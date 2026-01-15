@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXRAD Radar Viewer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-card: rgba(26, 26, 46, 0.9);
+            --border-color: rgba(255, 255, 255, 0.15);
+            --text-primary: #eee;
+            --text-secondary: #aaa;
+            --accent-1: #00d9ff;
+            --accent-2: #00ff88;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+        }
+
+        #map {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 0;
+        }
+
+        .overlay {
+            position: fixed;
+            z-index: 1000;
+            pointer-events: none;
+        }
+
+        .overlay > * {
+            pointer-events: auto;
+        }
+
+        .top-bar {
+            top: 15px;
+            left: 15px;
+            right: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .panel {
+            background: var(--bg-card);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 12px 16px;
+            color: var(--text-primary);
+        }
+
+        .logo h1 {
+            font-size: 1.1rem;
+            background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            white-space: nowrap;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        select, button {
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        select {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+        }
+
+        button {
+            background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+            border: none;
+            color: #1a1a2e;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px rgba(0, 217, 255, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        button.secondary {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+        }
+
+        button.secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: none;
+        }
+
+        .bottom-bar {
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .animation-panel {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .progress-bar {
+            width: 150px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+            transition: width 0.2s;
+        }
+
+        .frame-info {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            min-width: 100px;
+        }
+
+        .opacity-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .opacity-control label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .opacity-control input[type="range"] {
+            width: 60px;
+            accent-color: var(--accent-1);
+        }
+
+        .info-panel {
+            bottom: 30px;
+            right: 15px;
+        }
+
+        .station-info {
+            font-size: 0.85rem;
+        }
+
+        .station-info .code {
+            color: var(--accent-1);
+            font-weight: 600;
+        }
+
+        .time-info {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /* Loaded layers panel */
+        .layers-panel {
+            bottom: 30px;
+            left: 15px;
+            max-width: 300px;
+        }
+
+        .layers-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .layers-header h3 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--accent-1);
+        }
+
+        .layer-count {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        #loadedStations {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .loaded-station {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: rgba(0, 217, 255, 0.15);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .loaded-station:hover {
+            background: rgba(0, 217, 255, 0.25);
+        }
+
+        .remove-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            cursor: pointer;
+            padding: 0 2px;
+            line-height: 1;
+        }
+
+        .remove-btn:hover {
+            color: #ff6b6b;
+        }
+
+        .no-layers {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        #clearAllBtn {
+            font-size: 0.7rem;
+            padding: 4px 8px;
+            background: rgba(255, 107, 107, 0.2);
+            border: 1px solid rgba(255, 107, 107, 0.4);
+            color: #ff6b6b;
+        }
+
+        #clearAllBtn:hover {
+            background: rgba(255, 107, 107, 0.3);
+            box-shadow: none;
+            transform: none;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 1001;
+        }
+
+        .loading-overlay .panel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 30px 40px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-left-color: var(--accent-1);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .welcome-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        .welcome-panel {
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .welcome-panel h2 {
+            font-size: 1.3rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .welcome-panel p {
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+        }
+
+        .welcome-panel select {
+            width: 100%;
+            padding: 12px;
+            font-size: 1rem;
+            margin-bottom: 15px;
+        }
+
+        .welcome-panel button {
+            width: 100%;
+            padding: 12px;
+            font-size: 1rem;
+        }
+
+        /* Dark tiles for dark theme */
+        .leaflet-tile-pane {
+            filter: invert(1) hue-rotate(180deg);
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <!-- Top bar with logo and controls -->
+    <div class="overlay top-bar">
+        <div class="panel logo">
+            <h1>NEXRAD Radar</h1>
+        </div>
+        <div class="panel controls">
+            <select id="stationSelect"></select>
+            <select id="fieldSelect">
+                <option value="reflectivity">Reflectivity</option>
+                <option value="velocity">Velocity</option>
+            </select>
+            <button onclick="loadRadar()" id="loadBtn">Load</button>
+            <button onclick="loadAnimation()" id="animBtn" class="secondary">Animate</button>
+            <div class="opacity-control">
+                <label>Opacity</label>
+                <input type="range" id="opacitySlider" min="0" max="100" value="70" oninput="setRadarOpacity(this.value / 100)">
+            </div>
+        </div>
+    </div>
+
+    <!-- Animation controls -->
+    <div class="overlay bottom-bar" id="animControls" style="display: none;">
+        <div class="panel animation-panel">
+            <button onclick="prevFrame()" class="secondary">&lt;</button>
+            <button onclick="togglePlayPause()" id="playPauseBtn">Pause</button>
+            <button onclick="nextFrame()" class="secondary">&gt;</button>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <span class="frame-info" id="frameInfo">1 / 6</span>
+        </div>
+    </div>
+
+    <!-- Station info panel -->
+    <div class="overlay info-panel" id="infoPanel">
+        <div class="panel">
+            <div class="station-info">
+                <span class="code" id="currentCode">---</span>
+                <span id="currentName"></span>
+            </div>
+            <div class="time-info" id="timeInfo"></div>
+        </div>
+    </div>
+
+    <!-- Loaded layers panel -->
+    <div class="overlay layers-panel" id="layersPanel">
+        <div class="panel">
+            <div class="layers-header">
+                <h3>Loaded Stations</h3>
+                <button id="clearAllBtn" onclick="clearAllLayers()" style="display: none;">Clear All</button>
+            </div>
+            <div id="loadedStations"><span class="no-layers">No layers loaded</span></div>
+            <div class="layer-count" id="layerCount">0 stations loaded</div>
+        </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="panel">
+            <div class="spinner"></div>
+            <div id="loadingText">Loading radar data...</div>
+        </div>
+    </div>
+
+    <!-- Welcome screen -->
+    <div class="welcome-overlay" id="welcomeOverlay" style="display: none;">
+        <div class="panel welcome-panel">
+            <h2>Welcome to NEXRAD Radar</h2>
+            <p>Select your default radar station to get started</p>
+            <select id="welcomeStationSelect"></select>
+            <button onclick="setDefaultStation()">Set Default & Start</button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

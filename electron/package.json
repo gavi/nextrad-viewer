@@ -1,0 +1,89 @@
+{
+  "name": "nexrad-viewer",
+  "version": "0.1.0",
+  "description": "Interactive NEXRAD weather radar viewer desktop app with OpenStreetMap integration",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "dev": "tsc && electron .",
+    "package": "npm run build && electron-builder --mac",
+    "package:win": "npm run build && electron-builder --win",
+    "package:linux": "npm run build && electron-builder --linux"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "wait-on": "^8.0.0"
+  },
+  "build": {
+    "appId": "com.nexrad.viewer",
+    "productName": "NEXRAD Viewer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "loading.html",
+      "error.html"
+    ],
+    "extraResources": [
+      {
+        "from": "../nexrad_viewer",
+        "to": "python/nexrad_viewer"
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "python/pyproject.toml"
+      },
+      {
+        "from": "../main.py",
+        "to": "python/main.py"
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["universal"]
+        }
+      ],
+      "category": "public.app-category.weather",
+      "icon": "icons/icon.icns",
+      "identity": "ObjectGraph LLC (PHKS4YZMLE)",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "notarize": false
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "target": ["nsis", "zip"]
+    },
+    "linux": {
+      "target": ["AppImage", "deb"]
+    }
+  }
+}

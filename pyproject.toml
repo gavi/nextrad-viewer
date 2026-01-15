@@ -1,0 +1,19 @@
+[project]
+name = "nexrad-viewer"
+version = "0.1.0"
+description = "Interactive NEXRAD weather radar viewer desktop app with OpenStreetMap integration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "arm-pyart>=1.18.0",
+    "matplotlib>=3.9.0",
+    "numpy>=2.0.0",
+    "boto3>=1.35.0",
+    "s3fs>=2024.0.0",
+    "nexradaws>=2.0.0",
+]
+
+[project.scripts]
+nexrad-viewer = "nexrad_viewer.server:main"

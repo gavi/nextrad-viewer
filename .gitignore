@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+.uv/
+
+# Electron
+electron/node_modules/
+electron/dist/
+electron/release/
+electron/out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Cache
+*.pyc
+.cache/
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Radar cache (user data)
+RadarViewer/

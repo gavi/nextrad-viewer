@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            -webkit-app-region: drag;
+        }
+        .error-icon {
+            width: 60px;
+            height: 60px;
+            border: 4px solid #ff4757;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            margin-bottom: 24px;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #ff4757;
+        }
+        p {
+            color: #888;
+            font-size: 0.9rem;
+            text-align: center;
+            max-width: 400px;
+            line-height: 1.6;
+        }
+        .suggestions {
+            margin-top: 24px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            max-width: 400px;
+        }
+        .suggestions h2 {
+            font-size: 1rem;
+            margin-bottom: 12px;
+            color: #00d9ff;
+        }
+        .suggestions ul {
+            list-style: none;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        .suggestions li {
+            padding: 6px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+        .suggestions li::before {
+            content: '>';
+            position: absolute;
+            left: 0;
+            color: #00d9ff;
+        }
+    </style>
+</head>
+<body>
+    <div class="error-icon">!</div>
+    <h1>Failed to Start</h1>
+    <p>The Python server could not be started. This usually means there's an issue with the Python environment.</p>
+    <div class="suggestions">
+        <h2>Try these steps:</h2>
+        <ul>
+            <li>Make sure uv is installed</li>
+            <li>Check that Python 3.12+ is available</li>
+            <li>Run 'uv sync' in the project directory</li>
+            <li>Check the console for error details</li>
+        </ul>
+    </div>
+</body>
+</html>
