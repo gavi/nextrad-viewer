@@ -4,6 +4,15 @@ let radarLayers = new Map(); // Map of station code -> { layer, bounds, timestam
 let currentStation = null;
 let stations = {};
 
+// Drawing/selection state
+let stationMarkers = new Map(); // Map of station code -> marker
+let drawnItems = null; // Feature group for drawn shapes
+let selectedStations = new Set(); // Currently selected station codes
+
+// Forecast state
+let forecastData = new Map(); // station -> frames
+let forecastMode = false;
+
 // Animation state
 let animationData = new Map(); // Map of station code -> array of frames
 let animationIndex = 0;
@@ -50,6 +59,9 @@ async function init() {
     // Add station markers to map
     addStationMarkers();
 
+    // Initialize drawing controls
+    initDrawControls();
+
     // Update layer count display
     updateLayerCount();
 }
@@ -87,6 +99,9 @@ function addStationMarkers() {
         });
 
         marker.on('click', () => selectStation(code));
+
+        // Store marker reference for selection highlighting
+        stationMarkers.set(code, marker);
     });
 }
 
@@ -375,7 +390,49 @@ function showFrame(index) {
     const targetTimestamp = syncedTimestamps[index];
     const opacity = document.getElementById('opacitySlider').value / 100;
 
-    // Update each station's layer with the closest frame to this timestamp
+    // Handle forecast mode
+    if (forecastMode && forecastData.size > 0) {
+        forecastData.forEach((frames, station) => {
+            const frame = frames[index];
+            if (!frame) return;
+
+            // Remove existing layer for this station
+            if (radarLayers.has(station)) {
+                map.removeLayer(radarLayers.get(station).layer);
+            }
+
+            // Add frame as overlay
+            const bounds = [[frame.bounds.south, frame.bounds.west],
+                           [frame.bounds.north, frame.bounds.east]];
+
+            const layer = L.imageOverlay(
+                `data:image/png;base64,${frame.image}`,
+                bounds,
+                { opacity: opacity }
+            ).addTo(map);
+
+            // Store layer data
+            radarLayers.set(station, {
+                layer: layer,
+                bounds: frame.bounds,
+                timestamp: frame.timestamp,
+                field: document.getElementById('fieldSelect').value,
+                is_forecast: true
+            });
+        });
+
+        // Update layer list
+        updateLoadedStationsList();
+
+        // Update UI with forecast indicator
+        const leadTime = forecastData.get(currentStation)?.[index]?.lead_time_min || (index + 1) * 5;
+        document.getElementById('frameInfo').textContent = `+${leadTime} min (${index + 1}/${syncedTimestamps.length})`;
+        document.getElementById('progressFill').style.width = `${((index + 1) / syncedTimestamps.length) * 100}%`;
+        document.getElementById('timeInfo').textContent = `FORECAST: ${targetTimestamp}`;
+        return;
+    }
+
+    // Normal animation mode
     animationData.forEach((frames, station) => {
         const frame = findClosestFrame(frames, targetTimestamp);
         if (!frame) return;
@@ -431,6 +488,8 @@ function stopAnimation() {
     }
     isPlaying = false;
     animationData.clear();
+    forecastData.clear();
+    forecastMode = false;
     animationIndex = 0;
     syncedTimestamps = [];
 }
@@ -455,6 +514,58 @@ function nextFrame() {
     showFrame(animationIndex);
 }
 
+async function loadForecast() {
+    stopAnimation();
+    forecastMode = true;
+
+    const station = document.getElementById('stationSelect').value;
+    const field = document.getElementById('fieldSelect').value;
+    currentStation = station;
+    updateStationInfo();
+
+    showLoading('Generating forecast (this may take a moment)...');
+
+    try {
+        const res = await fetch(`/api/radar/${station}/forecast?field=${field}&lead_times=6&timestep_min=5`);
+        const data = await res.json();
+
+        if (data.error) {
+            hideLoading();
+            alert('Forecast error: ' + data.error);
+            return;
+        }
+
+        if (!data.frames || data.frames.length === 0) {
+            hideLoading();
+            alert('No forecast frames generated');
+            return;
+        }
+
+        // Clear previous forecast data
+        forecastData.clear();
+        forecastData.set(station, data.frames);
+
+        // Build synced timestamps from forecast
+        syncedTimestamps = data.frames.map(f => f.timestamp);
+        animationIndex = 0;
+
+        // Show animation controls
+        document.getElementById('animControls').style.display = 'block';
+
+        // Display first forecast frame
+        showFrame(0);
+
+        // Start playing
+        playAnimation();
+
+        hideLoading();
+
+    } catch (err) {
+        hideLoading();
+        alert('Forecast error: ' + err.message);
+    }
+}
+
 function setRadarOpacity(opacity) {
     // Update opacity for all layers
     radarLayers.forEach((data, code) => {
@@ -462,6 +573,213 @@ function setRadarOpacity(opacity) {
             data.layer.setOpacity(opacity);
         }
     });
+}
+
+// Drawing and selection functions
+function initDrawControls() {
+    // Check if Leaflet.Draw is loaded
+    if (typeof L.Control.Draw === 'undefined') {
+        console.error('Leaflet.Draw not loaded!');
+        return;
+    }
+
+    // Create feature group for drawn shapes
+    drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+
+    // Initialize draw control with toolbar
+    const drawControl = new L.Control.Draw({
+        position: 'topright',
+        draw: {
+            polygon: {
+                shapeOptions: {
+                    color: '#00d9ff',
+                    fillColor: '#00d9ff',
+                    fillOpacity: 0.1
+                }
+            },
+            rectangle: {
+                shapeOptions: {
+                    color: '#00d9ff',
+                    fillColor: '#00d9ff',
+                    fillOpacity: 0.1
+                }
+            },
+            circle: {
+                shapeOptions: {
+                    color: '#00d9ff',
+                    fillColor: '#00d9ff',
+                    fillOpacity: 0.1
+                }
+            },
+            polyline: false,
+            marker: false,
+            circlemarker: false
+        },
+        edit: {
+            featureGroup: drawnItems,
+            remove: true
+        }
+    });
+    map.addControl(drawControl);
+
+    // Handle draw:created event
+    map.on('draw:created', (e) => {
+        // Clear previous selection
+        clearStationSelection();
+        drawnItems.clearLayers();
+
+        // Add new shape
+        drawnItems.addLayer(e.layer);
+
+        // Select stations inside the shape
+        selectStationsInShape(e.layer);
+    });
+
+    // Handle draw:deleted event - clear selection when shape is removed
+    map.on('draw:deleted', () => {
+        clearStationSelection();
+    });
+
+    // Handle draw:edited event - reselect when shape is modified
+    map.on('draw:edited', (e) => {
+        clearStationSelection();
+        e.layers.eachLayer((layer) => {
+            selectStationsInShape(layer);
+        });
+    });
+}
+
+function selectStationsInShape(layer) {
+    const newlySelected = [];
+
+    Object.entries(stations).forEach(([code, info]) => {
+        const point = L.latLng(info.lat, info.lon);
+        let isInside = false;
+
+        if (layer instanceof L.Circle) {
+            // For circles, check distance from center
+            isInside = point.distanceTo(layer.getLatLng()) <= layer.getRadius();
+        } else if (layer instanceof L.Polygon || layer instanceof L.Rectangle) {
+            // For polygons/rectangles, check if point is inside bounds first (quick check)
+            if (layer.getBounds().contains(point)) {
+                // For rectangles, bounds check is sufficient
+                if (layer instanceof L.Rectangle) {
+                    isInside = true;
+                } else {
+                    // For polygons, use ray-casting algorithm
+                    isInside = isPointInPolygon(point, layer);
+                }
+            }
+        }
+
+        if (isInside) {
+            selectedStations.add(code);
+            highlightStation(code, true);
+            newlySelected.push(code);
+        }
+    });
+
+    // Load radar for selected stations
+    if (newlySelected.length > 0) {
+        console.log(`Selected ${newlySelected.length} stations:`, newlySelected);
+        loadRadarForStations(newlySelected);
+    }
+}
+
+async function loadRadarForStations(stationCodes) {
+    const field = document.getElementById('fieldSelect').value;
+
+    // Filter out stations that already have radar loaded
+    const toLoad = stationCodes.filter(code => !radarLayers.has(code));
+
+    if (toLoad.length === 0) {
+        console.log('All selected stations already loaded');
+        return;
+    }
+
+    showLoading(`Loading radar for ${toLoad.length} station${toLoad.length !== 1 ? 's' : ''}...`);
+
+    // Load all stations in parallel
+    const promises = toLoad.map(async (station) => {
+        try {
+            const res = await fetch(`/api/radar/${station}?field=${field}`);
+            const data = await res.json();
+
+            if (data.error) {
+                console.warn(`Error loading ${station}:`, data.error);
+                return;
+            }
+
+            // Add radar image as overlay
+            const bounds = [[data.bounds.south, data.bounds.west],
+                           [data.bounds.north, data.bounds.east]];
+
+            const layer = L.imageOverlay(
+                `data:image/png;base64,${data.image}`,
+                bounds,
+                { opacity: document.getElementById('opacitySlider').value / 100 }
+            ).addTo(map);
+
+            // Store layer data
+            radarLayers.set(station, {
+                layer: layer,
+                bounds: data.bounds,
+                timestamp: data.timestamp,
+                field: field
+            });
+        } catch (err) {
+            console.warn(`Error loading ${station}:`, err.message);
+        }
+    });
+
+    await Promise.all(promises);
+
+    // Update UI
+    updateLayerCount();
+    hideLoading();
+}
+
+function isPointInPolygon(point, polygon) {
+    // Ray-casting algorithm for point-in-polygon
+    const latlngs = polygon.getLatLngs()[0]; // Get outer ring
+    let inside = false;
+
+    for (let i = 0, j = latlngs.length - 1; i < latlngs.length; j = i++) {
+        const xi = latlngs[i].lat, yi = latlngs[i].lng;
+        const xj = latlngs[j].lat, yj = latlngs[j].lng;
+
+        const intersect = ((yi > point.lng) !== (yj > point.lng))
+            && (point.lat < (xj - xi) * (point.lng - yi) / (yj - yi) + xi);
+
+        if (intersect) inside = !inside;
+    }
+
+    return inside;
+}
+
+function highlightStation(code, selected) {
+    const marker = stationMarkers.get(code);
+    if (marker) {
+        marker.setStyle({
+            fillColor: selected ? '#ff6b6b' : '#00d9ff',
+            radius: selected ? 8 : 6,
+            fillOpacity: selected ? 0.9 : 0.6,
+            weight: selected ? 2 : 1
+        });
+
+        // Bring selected markers to front
+        if (selected) {
+            marker.bringToFront();
+        }
+    }
+}
+
+function clearStationSelection() {
+    selectedStations.forEach((code) => {
+        highlightStation(code, false);
+    });
+    selectedStations.clear();
 }
 
 // Initialize on load

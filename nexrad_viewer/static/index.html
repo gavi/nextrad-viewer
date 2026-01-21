@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NEXRAD Radar Viewer</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -346,6 +348,45 @@
         .leaflet-tile-pane {
             filter: invert(1) hue-rotate(180deg);
         }
+
+        /* Leaflet Draw toolbar styling */
+        .leaflet-control-container .leaflet-top.leaflet-right {
+            z-index: 1001;
+            top: 70px;  /* Move below top bar */
+        }
+
+        .leaflet-draw-toolbar a {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+        }
+
+        .leaflet-draw-toolbar a:hover {
+            background-color: rgba(0, 217, 255, 0.2);
+        }
+
+        .leaflet-draw-actions {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+        }
+
+        .leaflet-draw-actions a {
+            color: var(--text-primary);
+            background: var(--bg-card);
+        }
+
+        .leaflet-draw-actions a:hover {
+            background: rgba(0, 217, 255, 0.2);
+        }
+
+        /* Selected station highlight */
+        .station-selected {
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.9; }
+            50% { opacity: 0.6; }
+        }
     </style>
 </head>
 <body>
@@ -364,6 +405,7 @@
             </select>
             <button onclick="loadRadar()" id="loadBtn">Load</button>
             <button onclick="loadAnimation()" id="animBtn" class="secondary">Animate</button>
+            <button onclick="loadForecast()" id="forecastBtn" class="secondary" style="background: linear-gradient(90deg, #ff6b6b, #ffa500); color: #1a1a2e;">Forecast</button>
             <div class="opacity-control">
                 <label>Opacity</label>
                 <input type="range" id="opacitySlider" min="0" max="100" value="70" oninput="setRadarOpacity(this.value / 100)">
@@ -425,6 +467,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=5"></script>
 </body>
 </html>

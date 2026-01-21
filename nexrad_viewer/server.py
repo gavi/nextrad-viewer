@@ -16,12 +16,25 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(title="Radar Viewer")
+
+# Middleware to disable caching for static files in development
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 # Mount static files
 STATIC_DIR = Path(__file__).parent / "static"
@@ -464,6 +477,266 @@ def generate_animation_frames(station: str, field: str = 'reflectivity',
     return frames if frames else [generate_radar_image(station, field)]
 
 
+def extract_radar_grid(radar_file: str, field: str = 'reflectivity',
+                       grid_size: int = 500) -> dict:
+    """Extract radar data as a regular Cartesian grid for pysteps."""
+    import pyart
+
+    try:
+        radar = pyart.io.read_nexrad_archive(radar_file)
+
+        radar_lat = radar.latitude['data'][0]
+        radar_lon = radar.longitude['data'][0]
+
+        # Get scan time
+        try:
+            time_start = radar.time['units'].split(' ')[-1]
+            scan_time = time_start
+        except:
+            scan_time = "Unknown"
+
+        # Calculate bounds (approx 250km radius)
+        extent_deg = 2.5
+        bounds = {
+            "north": float(radar_lat + extent_deg),
+            "south": float(radar_lat - extent_deg),
+            "east": float(radar_lon + extent_deg),
+            "west": float(radar_lon - extent_deg)
+        }
+
+        # Get sweep data
+        sweep = 0
+        start_idx = radar.sweep_start_ray_index['data'][sweep]
+        end_idx = radar.sweep_end_ray_index['data'][sweep]
+
+        # Extract data
+        azimuth = radar.azimuth['data'][start_idx:end_idx+1]
+        rng = radar.range['data'] / 1000.0  # Convert to km
+
+        # Find the correct field name
+        data = None
+        if field == 'reflectivity':
+            for try_field in ['reflectivity', 'REF', 'DBZH', 'DBZ']:
+                if try_field in radar.fields:
+                    data = radar.fields[try_field]['data'][start_idx:end_idx+1]
+                    break
+        else:
+            for try_field in ['velocity', 'VEL', 'V']:
+                if try_field in radar.fields:
+                    data = radar.fields[try_field]['data'][start_idx:end_idx+1]
+                    break
+
+        if data is None:
+            return None
+
+        # Convert masked array to regular array with NaN for missing
+        if hasattr(data, 'filled'):
+            data = data.filled(np.nan)
+
+        # Convert polar to cartesian coordinates
+        azimuth_rad = np.deg2rad(azimuth)
+        r, az = np.meshgrid(rng, azimuth_rad)
+
+        # Calculate x, y in km from radar
+        x_polar = r * np.sin(az)
+        y_polar = r * np.cos(az)
+
+        # Convert to lat/lon
+        km_per_deg = 111.0
+        lons_polar = radar_lon + x_polar / (km_per_deg * np.cos(np.deg2rad(radar_lat)))
+        lats_polar = radar_lat + y_polar / km_per_deg
+
+        # Create regular grid
+        lon_grid = np.linspace(bounds['west'], bounds['east'], grid_size)
+        lat_grid = np.linspace(bounds['south'], bounds['north'], grid_size)
+        lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
+
+        # Interpolate to regular grid using scipy
+        from scipy.interpolate import griddata
+
+        # Flatten polar coordinates and data
+        points = np.column_stack([lons_polar.ravel(), lats_polar.ravel()])
+        values = data.ravel()
+
+        # Remove NaN points for interpolation
+        valid_mask = ~np.isnan(values)
+        if np.sum(valid_mask) < 100:
+            return None
+
+        grid_data = griddata(
+            points[valid_mask],
+            values[valid_mask],
+            (lon_mesh, lat_mesh),
+            method='linear',
+            fill_value=np.nan
+        )
+
+        return {
+            "data": grid_data,
+            "timestamp": scan_time,
+            "bounds": bounds,
+            "lat_grid": lat_grid,
+            "lon_grid": lon_grid,
+            "radar_lat": radar_lat,
+            "radar_lon": radar_lon
+        }
+
+    except Exception as e:
+        print(f"Error extracting radar grid: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def generate_forecast(station: str, field: str = 'reflectivity',
+                      lead_times: int = 6, timestep_min: int = 5) -> dict:
+    """Generate optical flow forecast using pysteps."""
+    from pysteps import motion, extrapolation
+
+    # Get recent radar scans (need at least 3 for motion estimation)
+    files = get_radar_scans(station, count=4)
+
+    if len(files) < 2:
+        return {
+            "error": f"Not enough radar scans for forecasting (need 2+, got {len(files)})",
+            "frames": []
+        }
+
+    print(f"Generating forecast from {len(files)} radar files...")
+
+    # Extract radar data as grids
+    grids = []
+    for f in files:
+        grid = extract_radar_grid(f, field)
+        if grid is not None:
+            grids.append(grid)
+
+    if len(grids) < 2:
+        return {
+            "error": "Failed to extract radar grids for forecasting",
+            "frames": []
+        }
+
+    # Stack grids into 3D array (time, y, x)
+    radar_stack = np.stack([g['data'] for g in grids], axis=0)
+
+    # Replace NaN with a low value for motion estimation
+    radar_stack_filled = np.nan_to_num(radar_stack, nan=-10.0)
+
+    print(f"Radar stack shape: {radar_stack.shape}")
+
+    # Estimate motion field using Lucas-Kanade optical flow
+    try:
+        # Use the last 2-3 frames for motion estimation
+        motion_frames = radar_stack_filled[-3:] if len(radar_stack_filled) >= 3 else radar_stack_filled
+        V = motion.lucaskanade.dense_lucaskanade(motion_frames)
+        print(f"Motion field estimated, shape: {V.shape}")
+    except Exception as e:
+        print(f"Error estimating motion: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": f"Motion estimation failed: {str(e)}",
+            "frames": []
+        }
+
+    # Extrapolate forward
+    try:
+        # Use the last frame as the starting point
+        last_frame = radar_stack_filled[-1]
+
+        # Extrapolate for lead_times timesteps
+        forecast = extrapolation.semilagrangian.extrapolate(
+            last_frame, V, lead_times
+        )
+        print(f"Forecast generated, shape: {forecast.shape}")
+    except Exception as e:
+        print(f"Error in extrapolation: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": f"Extrapolation failed: {str(e)}",
+            "frames": []
+        }
+
+    # Generate images for each forecast frame
+    frames = []
+    bounds = grids[-1]['bounds']
+    last_timestamp = grids[-1]['timestamp']
+
+    # Parse last timestamp to generate forecast timestamps
+    try:
+        base_time = datetime.fromisoformat(last_timestamp.replace('Z', '+00:00'))
+    except:
+        base_time = datetime.utcnow()
+
+    if field == 'reflectivity':
+        vmin, vmax = -10, 70
+        cmap = 'NWSRef'
+    else:
+        vmin, vmax = -30, 30
+        cmap = 'NWSVel'
+
+    for i in range(lead_times):
+        try:
+            frame_data = forecast[i]
+
+            # Create figure
+            fig = plt.figure(figsize=(10, 10), dpi=100)
+            fig.patch.set_alpha(0)
+
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(bounds['west'], bounds['east'])
+            ax.set_ylim(bounds['south'], bounds['north'])
+            ax.set_aspect('equal')
+            ax.axis('off')
+            ax.patch.set_alpha(0)
+
+            # Create meshgrid for plotting
+            lon_mesh, lat_mesh = np.meshgrid(grids[-1]['lon_grid'], grids[-1]['lat_grid'])
+
+            # Mask invalid values
+            frame_masked = np.ma.masked_where(
+                (frame_data < vmin) | np.isnan(frame_data),
+                frame_data
+            )
+
+            ax.pcolormesh(lon_mesh, lat_mesh, frame_masked,
+                         cmap=cmap, vmin=vmin, vmax=vmax,
+                         alpha=0.8, shading='auto')
+
+            # Save to buffer
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', transparent=True,
+                       bbox_inches='tight', pad_inches=0, dpi=100)
+            buf.seek(0)
+            image_base64 = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)
+
+            # Calculate forecast timestamp
+            forecast_time = base_time + timedelta(minutes=(i + 1) * timestep_min)
+
+            frames.append({
+                "image": image_base64,
+                "timestamp": forecast_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "bounds": bounds,
+                "lead_time_min": (i + 1) * timestep_min,
+                "is_forecast": True
+            })
+
+        except Exception as e:
+            print(f"Error generating forecast frame {i}: {e}")
+            continue
+
+    return {
+        "station": station,
+        "field": field,
+        "frames": frames,
+        "timestep_min": timestep_min,
+        "method": "optical_flow_extrapolation"
+    }
+
+
 # Routes
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -556,6 +829,45 @@ async def get_radar_animation(station: str, field: str = 'reflectivity', frames:
         return JSONResponse(
             status_code=500,
             content={"error": str(e), "station": station}
+        )
+
+
+@app.get("/api/radar/{station}/forecast")
+async def get_radar_forecast(station: str, field: str = 'reflectivity',
+                              lead_times: int = 6, timestep_min: int = 5):
+    """Generate optical flow forecast for a station."""
+    station = station.upper()
+
+    if station not in RADAR_STATIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown station: {station}")
+
+    try:
+        result = generate_forecast(station, field, lead_times, timestep_min)
+
+        if result.get('error'):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "error": result['error'],
+                    "station": station,
+                    "frames": []
+                }
+            )
+
+        return {
+            "station": station,
+            "name": RADAR_STATIONS[station]["name"],
+            "field": field,
+            "frames": result['frames'],
+            "timestep_min": timestep_min,
+            "method": result.get('method', 'optical_flow')
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "station": station, "frames": []}
         )
 
 

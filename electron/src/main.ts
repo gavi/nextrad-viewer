@@ -7,7 +7,7 @@
  * 3. Load the server's web UI in an Electron window
  */
 
-import { app, BrowserWindow, ipcMain, dialog, shell } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, session } from "electron";
 import * as path from "path";
 import { PythonServer } from "./python-server";
 
@@ -52,12 +52,16 @@ async function showUvNotFoundDialog(): Promise<void> {
 }
 
 async function createWindow(): Promise<void> {
+  const iconPath = path.join(__dirname, "..", "icons", "icon.icns");
+  const icon = nativeImage.createFromPath(iconPath);
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
     title: "NEXRAD Viewer",
+    icon: icon.isEmpty() ? undefined : icon,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -113,7 +117,20 @@ ipcMain.handle("restart-server", async () => {
 });
 
 // App lifecycle
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  // Clear cache in dev mode
+  await session.defaultSession.clearCache();
+
+  // Set dock icon on macOS
+  if (process.platform === "darwin" && app.dock) {
+    const iconPath = path.join(__dirname, "..", "icons", "icon.icns");
+    const icon = nativeImage.createFromPath(iconPath);
+    if (!icon.isEmpty()) {
+      app.dock.setIcon(icon);
+    }
+  }
+  createWindow();
+});
 
 app.on("window-all-closed", async () => {
   // Stop the Python server when the app closes
