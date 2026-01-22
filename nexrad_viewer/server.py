@@ -61,7 +61,13 @@ def get_cache_dir() -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
+def get_image_cache_dir() -> Path:
+    cache_dir = get_app_dir() / 'image_cache'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
 def cleanup_old_cache(max_age_hours: int = 1) -> None:
+    # Clean radar file cache
     cache_dir = get_cache_dir()
     cutoff = datetime.now().timestamp() - (max_age_hours * 3600)
     for f in cache_dir.glob('*'):
@@ -71,6 +77,45 @@ def cleanup_old_cache(max_age_hours: int = 1) -> None:
                 print(f"Cleaned up old cache: {f.name}")
             except:
                 pass
+    # Clean image cache
+    image_cache_dir = get_image_cache_dir()
+    for f in image_cache_dir.glob('*.json'):
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            try:
+                f.unlink()
+                print(f"Cleaned up old image cache: {f.name}")
+            except:
+                pass
+
+def get_image_cache_key(radar_file: str, field: str) -> str:
+    """Generate a cache key for a radar image."""
+    import hashlib
+    filename = Path(radar_file).name
+    key = f"{filename}_{field}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+def get_cached_image(radar_file: str, field: str) -> Optional[dict]:
+    """Check if a cached image exists and return it."""
+    cache_key = get_image_cache_key(radar_file, field)
+    cache_file = get_image_cache_dir() / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            data = json.loads(cache_file.read_text())
+            print(f"Cache hit: {Path(radar_file).name} ({field})")
+            return data
+        except:
+            pass
+    return None
+
+def save_cached_image(radar_file: str, field: str, data: dict) -> None:
+    """Save a radar image to the cache."""
+    cache_key = get_image_cache_key(radar_file, field)
+    cache_file = get_image_cache_dir() / f"{cache_key}.json"
+    try:
+        cache_file.write_text(json.dumps(data))
+        print(f"Cached image: {Path(radar_file).name} ({field})")
+    except Exception as e:
+        print(f"Failed to cache image: {e}")
 
 def load_preferences() -> dict:
     prefs_path = get_prefs_path()
@@ -336,6 +381,11 @@ def generate_radar_image(station: str, field: str = 'reflectivity',
             "bounds": None
         }
 
+    # Check image cache first
+    cached = get_cached_image(radar_file, field)
+    if cached:
+        return cached
+
     try:
         radar = pyart.io.read_nexrad_archive(radar_file)
 
@@ -436,12 +486,17 @@ def generate_radar_image(station: str, field: str = 'reflectivity',
         image_base64 = base64.b64encode(buf.read()).decode('utf-8')
         plt.close(fig)
 
-        return {
+        result = {
             "image": image_base64,
             "timestamp": scan_time,
             "bounds": bounds,
             "error": None
         }
+
+        # Save to image cache
+        save_cached_image(radar_file, field, result)
+
+        return result
 
     except Exception as e:
         print(f"Error reading radar: {e}")

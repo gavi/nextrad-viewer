@@ -170,6 +170,31 @@
             accent-color: var(--accent-1);
         }
 
+        .toggle-control {
+            display: flex;
+            align-items: center;
+        }
+
+        .toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .toggle-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--accent-1);
+            cursor: pointer;
+        }
+
+        .toggle-text {
+            user-select: none;
+        }
+
         .info-panel {
             bottom: 30px;
             right: 15px;
@@ -410,6 +435,12 @@
                 <label>Opacity</label>
                 <input type="range" id="opacitySlider" min="0" max="100" value="70" oninput="setRadarOpacity(this.value / 100)">
             </div>
+            <div class="toggle-control">
+                <label class="toggle-label">
+                    <input type="checkbox" id="showStationsToggle" checked onchange="toggleStationMarkers(this.checked)">
+                    <span class="toggle-text">Stations</span>
+                </label>
+            </div>
         </div>
     </div>
 
@@ -467,6 +498,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=5"></script>
+    <script src="/static/app.js?v=8"></script>
 </body>
 </html>

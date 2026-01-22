@@ -53,7 +53,14 @@ async function init() {
         currentStation = prefs.default_station;
         document.getElementById('stationSelect').value = currentStation;
         updateStationInfo();
-        loadRadar();
+
+        // Try to load previously saved stations
+        await loadSavedStations();
+
+        // If no saved stations were loaded, load the default station
+        if (radarLayers.size === 0) {
+            loadRadar();
+        }
     }
 
     // Add station markers to map
@@ -178,6 +185,91 @@ function updateLoadedStationsList() {
     listEl.innerHTML = items.join('');
 }
 
+function saveLoadedStations() {
+    // Save current loaded stations to localStorage
+    const stationsList = [];
+    radarLayers.forEach((data, code) => {
+        stationsList.push({ station: code, field: data.field });
+    });
+
+    try {
+        localStorage.setItem('nexrad_loaded_stations', JSON.stringify(stationsList));
+    } catch (err) {
+        console.warn('Failed to save loaded stations:', err);
+    }
+}
+
+async function loadSavedStations() {
+    // Load previously saved stations from localStorage
+    try {
+        const saved = localStorage.getItem('nexrad_loaded_stations');
+        if (!saved) return;
+
+        const stationsList = JSON.parse(saved);
+
+        if (stationsList && stationsList.length > 0) {
+            console.log(`Loading ${stationsList.length} saved stations...`);
+            showLoading(`Restoring ${stationsList.length} saved station${stationsList.length !== 1 ? 's' : ''}...`);
+
+            const field = document.getElementById('fieldSelect').value;
+
+            // Load all saved stations in parallel
+            const promises = stationsList.map(async ({ station, field: savedField }) => {
+                try {
+                    const useField = savedField || field;
+                    const res = await fetch(`/api/radar/${station}?field=${useField}`);
+                    const radarData = await res.json();
+
+                    if (radarData.error) {
+                        console.warn(`Error loading saved station ${station}:`, radarData.error);
+                        return;
+                    }
+
+                    // Add radar image as overlay
+                    const bounds = [[radarData.bounds.south, radarData.bounds.west],
+                                   [radarData.bounds.north, radarData.bounds.east]];
+
+                    const layer = L.imageOverlay(
+                        `data:image/png;base64,${radarData.image}`,
+                        bounds,
+                        { opacity: document.getElementById('opacitySlider').value / 100 }
+                    ).addTo(map);
+
+                    // Store layer data
+                    radarLayers.set(station, {
+                        layer: layer,
+                        bounds: radarData.bounds,
+                        timestamp: radarData.timestamp,
+                        field: useField
+                    });
+                } catch (err) {
+                    console.warn(`Error loading saved station ${station}:`, err.message);
+                }
+            });
+
+            await Promise.all(promises);
+            updateLayerCount();
+            hideLoading();
+
+            // Fit map to show all loaded layers
+            if (radarLayers.size > 0) {
+                const allBounds = [];
+                radarLayers.forEach((data) => {
+                    if (data.bounds) {
+                        allBounds.push([data.bounds.south, data.bounds.west]);
+                        allBounds.push([data.bounds.north, data.bounds.east]);
+                    }
+                });
+                if (allBounds.length > 0) {
+                    map.fitBounds(allBounds);
+                }
+            }
+        }
+    } catch (err) {
+        console.warn('Failed to load saved stations:', err);
+    }
+}
+
 function focusStation(code) {
     const data = radarLayers.get(code);
     if (data && data.bounds) {
@@ -196,6 +288,7 @@ function removeLayer(code) {
     }
     radarLayers.delete(code);
     updateLayerCount();
+    saveLoadedStations();
 
     // If we removed the current station, clear the time info
     if (code === currentStation) {
@@ -204,13 +297,14 @@ function removeLayer(code) {
 }
 
 function clearAllLayers() {
-    radarLayers.forEach((data, code) => {
+    radarLayers.forEach((data) => {
         if (data.layer) {
             map.removeLayer(data.layer);
         }
     });
     radarLayers.clear();
     updateLayerCount();
+    saveLoadedStations();
     document.getElementById('timeInfo').textContent = '';
 }
 
@@ -271,6 +365,9 @@ async function loadRadar() {
         // Update layer count
         updateLayerCount();
 
+        // Save loaded stations
+        saveLoadedStations();
+
         // Pan to radar coverage
         map.fitBounds(bounds);
 
@@ -301,9 +398,14 @@ async function loadAnimation() {
     try {
         // Fetch animation frames for all stations in parallel
         const fetchPromises = stationsToAnimate.map(async (station) => {
-            const res = await fetch(`/api/radar/${station}/animation?field=${field}&frames=6`);
-            const data = await res.json();
-            return { station, data };
+            try {
+                const res = await fetch(`/api/radar/${station}/animation?field=${field}&frames=6`);
+                const data = await res.json();
+                return { station, data, success: true };
+            } catch (err) {
+                console.warn(`Failed to fetch animation for ${station}:`, err.message);
+                return { station, data: null, success: false, error: err.message };
+            }
         });
 
         const results = await Promise.all(fetchPromises);
@@ -313,10 +415,15 @@ async function loadAnimation() {
 
         // Process results and build synced timeline
         const allTimestamps = new Set();
+        const errors = [];
 
-        results.forEach(({ station, data }) => {
+        results.forEach(({ station, data, success, error }) => {
+            if (!success || !data) {
+                errors.push(`${station}: ${error || 'unknown error'}`);
+                return;
+            }
             if (data.error) {
-                console.warn(`Error loading animation for ${station}:`, data.error);
+                errors.push(`${station}: ${data.error}`);
                 return;
             }
 
@@ -330,6 +437,11 @@ async function loadAnimation() {
                 }
             });
         });
+
+        // Log errors but continue with successful stations
+        if (errors.length > 0) {
+            console.warn('Some stations failed to load:', errors);
+        }
 
         if (animationData.size === 0) {
             hideLoading();
@@ -568,9 +680,19 @@ async function loadForecast() {
 
 function setRadarOpacity(opacity) {
     // Update opacity for all layers
-    radarLayers.forEach((data, code) => {
+    radarLayers.forEach((data) => {
         if (data.layer) {
             data.layer.setOpacity(opacity);
+        }
+    });
+}
+
+function toggleStationMarkers(visible) {
+    stationMarkers.forEach((marker) => {
+        if (visible) {
+            marker.addTo(map);
+        } else {
+            map.removeLayer(marker);
         }
     });
 }
@@ -737,6 +859,7 @@ async function loadRadarForStations(stationCodes) {
 
     // Update UI
     updateLayerCount();
+    saveLoadedStations();
     hideLoading();
 }
 
