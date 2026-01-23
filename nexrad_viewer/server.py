@@ -303,12 +303,35 @@ RADAR_STATIONS = {
 }
 
 
-def get_radar_scans(station: str, count: int = 6) -> List[str]:
-    """Get radar files from AWS S3 with local caching."""
+_last_cleanup_time = None
+
+def get_radar_scans(station: str, count: int = 6, skip_download: bool = False) -> List[str]:
+    """Get radar files from AWS S3 with local caching.
+
+    Args:
+        station: Radar station code
+        count: Number of scans to retrieve
+        skip_download: If True, only return cached files (no S3 downloads)
+    """
     import nexradaws
     import shutil
 
-    cleanup_old_cache(max_age_hours=1)
+    # Only run cleanup every 10 minutes, not on every request
+    global _last_cleanup_time
+    now = datetime.now()
+    if _last_cleanup_time is None or (now - _last_cleanup_time).total_seconds() > 600:
+        cleanup_old_cache(max_age_hours=1)
+        _last_cleanup_time = now
+
+    cache_dir = get_cache_dir()
+
+    # Fast path: check cache first
+    if skip_download:
+        cached_files = sorted(
+            [str(f) for f in cache_dir.glob(f'{station}*') if f.is_file() and '_MDM' not in f.name],
+            key=lambda f: f
+        )
+        return cached_files[-count:] if len(cached_files) >= count else cached_files
 
     conn = nexradaws.NexradAwsInterface()
     cache_dir = get_cache_dir()
@@ -943,15 +966,36 @@ async def set_station_preference(pref: StationPreference):
 
 
 @app.get("/api/radar/{station}")
-async def get_radar(station: str, field: str = 'reflectivity'):
-    """Get radar image overlay for a station."""
+async def get_radar(station: str, field: str = 'reflectivity', cache_only: bool = False):
+    """Get radar image overlay for a station.
+
+    Args:
+        station: Radar station code
+        field: 'reflectivity' or 'velocity'
+        cache_only: If True, only return data if cached (no S3 download, faster for bulk loads)
+    """
     station = station.upper()
 
     if station not in RADAR_STATIONS:
         raise HTTPException(status_code=404, detail=f"Unknown station: {station}")
 
     try:
-        result = generate_radar_image(station, field)
+        # Fast path for cache_only requests
+        if cache_only:
+            cache_dir = get_cache_dir()
+            cached_files = sorted(
+                [f for f in cache_dir.glob(f'{station}*') if f.is_file() and '_MDM' not in f.name],
+                key=lambda f: f.name
+            )
+            if not cached_files:
+                return JSONResponse(
+                    status_code=200,
+                    content={"error": "No cached data", "station": station, "cache_miss": True}
+                )
+            radar_file = str(cached_files[-1])
+            result = generate_radar_image(station, field, radar_file=radar_file)
+        else:
+            result = generate_radar_image(station, field)
 
         if result['error']:
             return JSONResponse(

@@ -1005,7 +1005,7 @@ function selectStationsInShape(layer) {
     }
 }
 
-async function loadRadarForStations(stationCodes) {
+async function loadRadarForStations(stationCodes, useCache = false) {
     const field = document.getElementById('fieldSelect').value;
 
     // Filter out stations that already have radar loaded
@@ -1016,47 +1016,64 @@ async function loadRadarForStations(stationCodes) {
         return;
     }
 
-    showLoading(`Loading radar for ${toLoad.length} station${toLoad.length !== 1 ? 's' : ''}...`);
+    // Load in batches of 2 to avoid overwhelming the server
+    const BATCH_SIZE = 2;
+    let loaded = 0;
+    let failed = 0;
 
-    // Load all stations in parallel
-    const promises = toLoad.map(async (station) => {
-        try {
-            const res = await fetch(`/api/radar/${station}?field=${field}`);
-            const data = await res.json();
+    for (let i = 0; i < toLoad.length; i += BATCH_SIZE) {
+        const batch = toLoad.slice(i, i + BATCH_SIZE);
+        showLoading(`Loading ${loaded}/${toLoad.length} stations... (${batch.join(', ')})`);
 
-            if (data.error) {
-                console.warn(`Error loading ${station}:`, data.error);
-                return;
+        // Load batch in parallel
+        const promises = batch.map(async (station) => {
+            try {
+                const res = await fetch(`/api/radar/${station}?field=${field}`);
+                const data = await res.json();
+
+                if (data.error) {
+                    console.warn(`Error loading ${station}:`, data.error);
+                    failed++;
+                    return;
+                }
+
+                // Add radar image as overlay
+                const bounds = [[data.bounds.south, data.bounds.west],
+                               [data.bounds.north, data.bounds.east]];
+
+                const layer = L.imageOverlay(
+                    `data:image/png;base64,${data.image}`,
+                    bounds,
+                    { opacity: document.getElementById('opacitySlider').value / 100 }
+                ).addTo(map);
+
+                // Store layer data
+                radarLayers.set(station, {
+                    layer: layer,
+                    bounds: data.bounds,
+                    timestamp: data.timestamp,
+                    field: field
+                });
+                loaded++;
+
+                // Update count as each loads
+                updateLayerCount();
+            } catch (err) {
+                console.warn(`Error loading ${station}:`, err.message);
+                failed++;
             }
+        });
 
-            // Add radar image as overlay
-            const bounds = [[data.bounds.south, data.bounds.west],
-                           [data.bounds.north, data.bounds.east]];
+        await Promise.all(promises);
+    }
 
-            const layer = L.imageOverlay(
-                `data:image/png;base64,${data.image}`,
-                bounds,
-                { opacity: document.getElementById('opacitySlider').value / 100 }
-            ).addTo(map);
-
-            // Store layer data
-            radarLayers.set(station, {
-                layer: layer,
-                bounds: data.bounds,
-                timestamp: data.timestamp,
-                field: field
-            });
-        } catch (err) {
-            console.warn(`Error loading ${station}:`, err.message);
-        }
-    });
-
-    await Promise.all(promises);
-
-    // Update UI
-    updateLayerCount();
+    // Final update
     saveLoadedStations();
     hideLoading();
+
+    if (failed > 0) {
+        console.log(`Loaded ${loaded} stations, ${failed} failed`);
+    }
 }
 
 function isPointInPolygon(point, polygon) {
