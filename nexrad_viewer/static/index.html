@@ -123,9 +123,103 @@
         }
 
         .bottom-bar {
-            bottom: 30px;
+            bottom: 90px;
             left: 50%;
             transform: translateX(-50%);
+        }
+
+        .timeline-bar {
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: 90vw;
+        }
+
+        .timeline-panel {
+            padding: 8px 12px;
+        }
+
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .timeline-label {
+            font-size: 0.75rem;
+            color: var(--accent-1);
+            font-weight: 600;
+        }
+
+        .timeline-container {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+            padding: 4px 0;
+            max-width: 80vw;
+        }
+
+        .timeline-container::-webkit-scrollbar {
+            height: 4px;
+        }
+
+        .timeline-container::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+        }
+
+        .timeline-container::-webkit-scrollbar-thumb {
+            background: var(--accent-1);
+            border-radius: 2px;
+        }
+
+        .timeline-slot {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 6px 10px;
+            background: rgba(0, 217, 255, 0.1);
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            min-width: 70px;
+        }
+
+        .timeline-slot:hover {
+            background: rgba(0, 217, 255, 0.25);
+            border-color: var(--accent-1);
+        }
+
+        .timeline-slot.active {
+            background: rgba(0, 217, 255, 0.3);
+            border-color: var(--accent-1);
+            box-shadow: 0 0 10px rgba(0, 217, 255, 0.3);
+        }
+
+        .timeline-slot .time {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .timeline-slot .date {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+        }
+
+        .timeline-slot .count {
+            font-size: 0.6rem;
+            color: var(--accent-2);
+            margin-top: 2px;
+        }
+
+        .timeline-empty {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-style: italic;
+            padding: 8px;
         }
 
         .animation-panel {
@@ -219,7 +313,13 @@
         .layers-panel {
             bottom: 30px;
             left: 15px;
-            max-width: 300px;
+            max-width: 220px;
+        }
+
+        .layers-panel .panel {
+            max-height: 60vh;
+            display: flex;
+            flex-direction: column;
         }
 
         .layers-header {
@@ -227,23 +327,56 @@
             justify-content: space-between;
             align-items: center;
             margin-bottom: 8px;
+            flex-shrink: 0;
         }
 
         .layers-header h3 {
             font-size: 0.85rem;
             font-weight: 600;
             color: var(--accent-1);
+            cursor: pointer;
+        }
+
+        .layers-header h3:hover {
+            opacity: 0.8;
         }
 
         .layer-count {
             font-size: 0.75rem;
             color: var(--text-secondary);
+            flex-shrink: 0;
+            margin-top: 8px;
         }
 
         #loadedStations {
             display: flex;
             flex-wrap: wrap;
-            gap: 6px;
+            gap: 4px;
+            overflow-y: auto;
+            max-height: calc(60vh - 80px);
+            padding-right: 4px;
+        }
+
+        #loadedStations::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        #loadedStations::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+        }
+
+        #loadedStations::-webkit-scrollbar-thumb {
+            background: var(--accent-1);
+            border-radius: 2px;
+        }
+
+        .layers-collapsed #loadedStations {
+            display: none;
+        }
+
+        .layers-collapsed .layer-count {
+            margin-top: 0;
         }
 
         .loaded-station {
@@ -444,6 +577,19 @@
         </div>
     </div>
 
+    <!-- Cache Timeline -->
+    <div class="overlay timeline-bar" id="timelineBar">
+        <div class="panel timeline-panel">
+            <div class="timeline-header">
+                <span class="timeline-label">Cached Data</span>
+                <button onclick="refreshCacheTimeline()" class="secondary" style="font-size: 0.7rem; padding: 4px 8px;">↻ Refresh</button>
+            </div>
+            <div class="timeline-container" id="timelineContainer">
+                <div class="timeline-empty">Loading cache info...</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Animation controls -->
     <div class="overlay bottom-bar" id="animControls" style="display: none;">
         <div class="panel animation-panel">
@@ -472,8 +618,11 @@
     <div class="overlay layers-panel" id="layersPanel">
         <div class="panel">
             <div class="layers-header">
-                <h3>Loaded Stations</h3>
-                <button id="clearAllBtn" onclick="clearAllLayers()" style="display: none;">Clear All</button>
+                <h3 onclick="toggleLayersPanel()" title="Click to collapse/expand">▼ Stations</h3>
+                <div>
+                    <button id="refreshAllBtn" onclick="refreshAllLayers()" class="secondary" style="display: none; font-size: 0.7rem; padding: 4px 6px; margin-right: 4px;" title="Refresh all loaded stations">↻</button>
+                    <button id="clearAllBtn" onclick="clearAllLayers()" style="display: none;">Clear</button>
+                </div>
             </div>
             <div id="loadedStations"><span class="no-layers">No layers loaded</span></div>
             <div class="layer-count" id="layerCount">0 stations loaded</div>
@@ -498,6 +647,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=8"></script>
+    <script src="/static/app.js?v=11"></script>
 </body>
 </html>

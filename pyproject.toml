@@ -17,5 +17,8 @@ dependencies = [
     "gunicorn>=23.0.0",
 ]
 
+[project.optional-dependencies]
+forecast = ["pysteps>=1.9.0"]
+
 [project.scripts]
 nexrad-viewer = "nexrad_viewer.server:main"

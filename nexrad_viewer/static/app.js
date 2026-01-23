@@ -53,18 +53,14 @@ async function init() {
         currentStation = prefs.default_station;
         document.getElementById('stationSelect').value = currentStation;
         updateStationInfo();
-
-        // Try to load previously saved stations
-        await loadSavedStations();
-
-        // If no saved stations were loaded, load the default station
-        if (radarLayers.size === 0) {
-            loadRadar();
-        }
+        // Don't auto-load - let user select from timeline
     }
 
     // Add station markers to map
     addStationMarkers();
+
+    // Load cache timeline
+    await refreshCacheTimeline();
 
     // Initialize drawing controls
     initDrawControls();
@@ -165,8 +161,208 @@ function updateLayerCount() {
         clearBtn.style.display = radarLayers.size > 0 ? 'inline-block' : 'none';
     }
 
+    // Show/hide refresh all button
+    const refreshBtn = document.getElementById('refreshAllBtn');
+    if (refreshBtn) {
+        refreshBtn.style.display = radarLayers.size > 0 ? 'inline-block' : 'none';
+    }
+
     // Update loaded stations list
     updateLoadedStationsList();
+}
+
+function toggleLayersPanel() {
+    const panel = document.getElementById('layersPanel').querySelector('.panel');
+    const header = panel.querySelector('h3');
+    panel.classList.toggle('layers-collapsed');
+
+    if (panel.classList.contains('layers-collapsed')) {
+        header.textContent = '▶ Stations';
+    } else {
+        header.textContent = '▼ Stations';
+    }
+}
+
+async function refreshAllLayers() {
+    // Refresh all currently loaded stations
+    const stationsToRefresh = Array.from(radarLayers.keys());
+
+    if (stationsToRefresh.length === 0) {
+        return;
+    }
+
+    const field = document.getElementById('fieldSelect').value;
+    showLoading(`Refreshing ${stationsToRefresh.length} station${stationsToRefresh.length !== 1 ? 's' : ''}...`);
+
+    // Clear existing layers first
+    radarLayers.forEach((data) => {
+        if (data.layer) {
+            map.removeLayer(data.layer);
+        }
+    });
+    radarLayers.clear();
+
+    // Load all stations in parallel
+    const promises = stationsToRefresh.map(async (station) => {
+        try {
+            const res = await fetch(`/api/radar/${station}?field=${field}`);
+            const data = await res.json();
+
+            if (data.error) {
+                console.warn(`Error refreshing ${station}:`, data.error);
+                return;
+            }
+
+            const bounds = [[data.bounds.south, data.bounds.west],
+                           [data.bounds.north, data.bounds.east]];
+
+            const layer = L.imageOverlay(
+                `data:image/png;base64,${data.image}`,
+                bounds,
+                { opacity: document.getElementById('opacitySlider').value / 100 }
+            ).addTo(map);
+
+            radarLayers.set(station, {
+                layer: layer,
+                bounds: data.bounds,
+                timestamp: data.timestamp,
+                field: field
+            });
+        } catch (err) {
+            console.warn(`Error refreshing ${station}:`, err.message);
+        }
+    });
+
+    await Promise.all(promises);
+    updateLayerCount();
+    saveLoadedStations();
+    hideLoading();
+}
+
+// Timeline state
+let cacheTimeline = [];
+let activeTimeSlot = null;
+
+function formatUtcToLocal(isoDatetime) {
+    // Convert UTC datetime string to local time
+    const utcDate = new Date(isoDatetime + 'Z'); // Append Z to indicate UTC
+    return {
+        time: utcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }),
+        date: utcDate.toLocaleDateString([], { month: '2-digit', day: '2-digit' }),
+        full: utcDate.toLocaleString()
+    };
+}
+
+async function refreshCacheTimeline() {
+    const container = document.getElementById('timelineContainer');
+    container.innerHTML = '<div class="timeline-empty">Loading cache info...</div>';
+
+    try {
+        const res = await fetch('/api/cache/timeline');
+        const data = await res.json();
+        cacheTimeline = data.slots || [];
+
+        if (cacheTimeline.length === 0) {
+            container.innerHTML = '<div class="timeline-empty">No cached data. Load some stations first.</div>';
+            return;
+        }
+
+        // Render timeline slots (oldest to newest, left to right)
+        container.innerHTML = cacheTimeline.map((slot, index) => {
+            const local = formatUtcToLocal(slot.datetime);
+            return `
+                <div class="timeline-slot${activeTimeSlot === slot.slot_key ? ' active' : ''}"
+                     onclick="loadTimeSlot(${index})"
+                     title="${slot.stations.join(', ')} (${local.full})">
+                    <span class="time">${local.time}</span>
+                    <span class="date">${local.date}</span>
+                    <span class="count">${slot.station_count} stn</span>
+                </div>
+            `;
+        }).join('');
+
+        // Scroll to the end (most recent)
+        container.scrollLeft = container.scrollWidth;
+
+    } catch (err) {
+        console.error('Failed to load cache timeline:', err);
+        container.innerHTML = '<div class="timeline-empty">Failed to load cache info</div>';
+    }
+}
+
+async function loadTimeSlot(index) {
+    const slot = cacheTimeline[index];
+    if (!slot) return;
+
+    activeTimeSlot = slot.slot_key;
+    const field = document.getElementById('fieldSelect').value;
+
+    showLoading(`Loading ${slot.station_count} stations from ${slot.display_time}...`);
+
+    // Clear existing layers
+    radarLayers.forEach((data) => {
+        if (data.layer) {
+            map.removeLayer(data.layer);
+        }
+    });
+    radarLayers.clear();
+
+    // Load all stations from this time slot
+    const promises = slot.files.map(async ({ station }) => {
+        try {
+            const res = await fetch(`/api/radar/${station}/cached?field=${field}`);
+            const data = await res.json();
+
+            if (data.error) {
+                console.warn(`Error loading ${station}:`, data.error);
+                return;
+            }
+
+            const bounds = [[data.bounds.south, data.bounds.west],
+                           [data.bounds.north, data.bounds.east]];
+
+            const layer = L.imageOverlay(
+                `data:image/png;base64,${data.image}`,
+                bounds,
+                { opacity: document.getElementById('opacitySlider').value / 100 }
+            ).addTo(map);
+
+            radarLayers.set(station, {
+                layer: layer,
+                bounds: data.bounds,
+                timestamp: data.timestamp,
+                field: field
+            });
+        } catch (err) {
+            console.warn(`Error loading ${station}:`, err.message);
+        }
+    });
+
+    await Promise.all(promises);
+    updateLayerCount();
+    saveLoadedStations();
+    hideLoading();
+
+    // Update timeline UI to show active slot
+    refreshCacheTimeline();
+
+    // Update time display with local time
+    const local = formatUtcToLocal(slot.datetime);
+    document.getElementById('timeInfo').textContent = `${local.date} ${local.time} (Local)`;
+
+    // Fit map to show all loaded layers
+    if (radarLayers.size > 0) {
+        const allBounds = [];
+        radarLayers.forEach((data) => {
+            if (data.bounds) {
+                allBounds.push([data.bounds.south, data.bounds.west]);
+                allBounds.push([data.bounds.north, data.bounds.east]);
+            }
+        });
+        if (allBounds.length > 0) {
+            map.fitBounds(allBounds);
+        }
+    }
 }
 
 function updateLoadedStationsList() {

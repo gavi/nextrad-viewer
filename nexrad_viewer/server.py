@@ -351,12 +351,16 @@ def get_radar_scans(station: str, count: int = 6) -> List[str]:
                             continue
 
                     if len(downloaded_files) >= count:
+                        # Sort by filename (which contains timestamp) to ensure chronological order
+                        downloaded_files.sort()
                         return downloaded_files[-count:]
 
         except Exception as e:
             print(f"Error getting scans for {station}: {e}")
             continue
 
+    # Sort by filename to ensure chronological order (oldest first)
+    downloaded_files.sort()
     return downloaded_files
 
 
@@ -473,6 +477,16 @@ def generate_radar_image(station: str, field: str = 'reflectivity',
         lons = radar_lon + x / (km_per_deg * np.cos(np.deg2rad(radar_lat)))
         lats = radar_lat + y / km_per_deg
 
+        # Apply noise threshold - mask out low values
+        if field == 'reflectivity':
+            # Filter out values below 5 dBZ (noise/ground clutter)
+            noise_threshold = 5
+            data = np.ma.masked_where(data < noise_threshold, data)
+        else:
+            # For velocity, mask out very low absolute values (near zero = no motion)
+            noise_threshold = 1
+            data = np.ma.masked_where(np.abs(data) < noise_threshold, data)
+
         # Plot with transparency
         mesh = ax.pcolormesh(lons, lats, data, cmap=cmap,
                             vmin=vmin, vmax=vmax, alpha=0.8,
@@ -588,6 +602,15 @@ def extract_radar_grid(radar_file: str, field: str = 'reflectivity',
         if hasattr(data, 'filled'):
             data = data.filled(np.nan)
 
+        # Apply noise threshold - same as in generate_radar_image
+        # This is critical to prevent noise from polluting the forecast
+        if field == 'reflectivity':
+            noise_threshold = 5  # Filter out values below 5 dBZ
+            data = np.where(data < noise_threshold, np.nan, data)
+        else:
+            noise_threshold = 1  # For velocity, mask near-zero values
+            data = np.where(np.abs(data) < noise_threshold, np.nan, data)
+
         # Convert polar to cartesian coordinates
         azimuth_rad = np.deg2rad(azimuth)
         r, az = np.meshgrid(rng, azimuth_rad)
@@ -602,8 +625,9 @@ def extract_radar_grid(radar_file: str, field: str = 'reflectivity',
         lats_polar = radar_lat + y_polar / km_per_deg
 
         # Create regular grid
+        # Note: lat_grid goes from NORTH to SOUTH so row 0 = north (image convention)
         lon_grid = np.linspace(bounds['west'], bounds['east'], grid_size)
-        lat_grid = np.linspace(bounds['south'], bounds['north'], grid_size)
+        lat_grid = np.linspace(bounds['north'], bounds['south'], grid_size)  # North to South!
         lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
 
         # Interpolate to regular grid using scipy
@@ -646,10 +670,16 @@ def extract_radar_grid(radar_file: str, field: str = 'reflectivity',
 def generate_forecast(station: str, field: str = 'reflectivity',
                       lead_times: int = 6, timestep_min: int = 5) -> dict:
     """Generate optical flow forecast using pysteps."""
-    from pysteps import motion, extrapolation
+    try:
+        from pysteps import motion
+    except ImportError:
+        return {
+            "error": "Forecast feature requires pysteps library. Install with: uv pip install pysteps",
+            "frames": []
+        }
 
-    # Get recent radar scans (need at least 3 for motion estimation)
-    files = get_radar_scans(station, count=4)
+    # Get more radar scans for better motion estimation (6 frames = ~30 min history)
+    files = get_radar_scans(station, count=6)
 
     if len(files) < 2:
         return {
@@ -673,46 +703,126 @@ def generate_forecast(station: str, field: str = 'reflectivity',
         }
 
     # Stack grids into 3D array (time, y, x)
+    # IMPORTANT: frames must be in chronological order (oldest first)
     radar_stack = np.stack([g['data'] for g in grids], axis=0)
 
-    # Replace NaN with a low value for motion estimation
-    radar_stack_filled = np.nan_to_num(radar_stack, nan=-10.0)
-
     print(f"Radar stack shape: {radar_stack.shape}")
+    print(f"Frame timestamps (should be oldest to newest):")
+    for i, g in enumerate(grids):
+        print(f"  Frame {i}: {g['timestamp']}")
 
-    # Estimate motion field using Lucas-Kanade optical flow
+    # Check if there's enough precipitation to track
+    # Count pixels with significant reflectivity (> 10 dBZ)
+    significant_pixels = np.sum(radar_stack > 10) / radar_stack.size
+    print(f"Significant precipitation coverage: {significant_pixels*100:.1f}%")
+
+    if significant_pixels < 0.01:  # Less than 1% coverage
+        return {
+            "error": "Not enough precipitation to generate forecast. Forecast works best with active weather.",
+            "frames": []
+        }
+
+    # Replace NaN with 0 for motion estimation (no echo = 0 reflectivity)
+    radar_stack_filled = np.nan_to_num(radar_stack, nan=0.0)
+
+    # Note: Smoothing removed since noise filtering is now applied during grid extraction
+    # Keeping the data sharp for better motion tracking
+
+    # Estimate motion field using optical flow
+    use_persistence = False
+    V = None
+
     try:
-        # Use the last 2-3 frames for motion estimation
-        motion_frames = radar_stack_filled[-3:] if len(radar_stack_filled) >= 3 else radar_stack_filled
-        V = motion.lucaskanade.dense_lucaskanade(motion_frames)
-        print(f"Motion field estimated, shape: {V.shape}")
+        # Use Lucas-Kanade with better parameters for radar
+        V = motion.lucaskanade.dense_lucaskanade(
+            radar_stack_filled,
+            fd_method="shitomasi",
+            interp_method="idwinterp2d",
+            verbose=False
+        )
+        print(f"Motion field estimated using Lucas-Kanade, shape: {V.shape}")
+
+        # Debug: Print motion statistics
+        # V[0] = motion in y (row) direction, V[1] = motion in x (column) direction
+        v_y = V[0][~np.isnan(V[0])]
+        v_x = V[1][~np.isnan(V[1])]
+        if len(v_y) > 0:
+            mean_vy = np.mean(v_y)
+            mean_vx = np.mean(v_x)
+            print(f"Motion V_y (rows/timestep): mean={mean_vy:.2f}, range=[{np.min(v_y):.2f}, {np.max(v_y):.2f}]")
+            print(f"Motion V_x (cols/timestep): mean={mean_vx:.2f}, range=[{np.min(v_x):.2f}, {np.max(v_x):.2f}]")
+
+            # Convert to approximate km/h for understanding
+            # Grid resolution: ~5 degrees / 500 pixels = 0.01 deg/pixel = ~1.1 km/pixel
+            # Time step: ~5 minutes between frames
+            km_per_pixel = 1.1
+            min_per_step = 5
+            speed_kmh = np.sqrt(mean_vy**2 + mean_vx**2) * km_per_pixel * (60 / min_per_step)
+            print(f"Estimated mean motion: {speed_kmh:.1f} km/h")
+
+            # If motion is essentially zero, fall back to persistence
+            if np.abs(mean_vy) < 0.3 and np.abs(mean_vx) < 0.3:
+                print("WARNING: Motion vectors near zero - will use persistence forecast")
+                use_persistence = True
+
     except Exception as e:
         print(f"Error estimating motion: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            "error": f"Motion estimation failed: {str(e)}",
-            "frames": []
-        }
+        print("Falling back to persistence forecast")
+        use_persistence = True
 
-    # Extrapolate forward
-    try:
-        # Use the last frame as the starting point
-        last_frame = radar_stack_filled[-1]
+    # Generate forecast
+    last_frame = radar_stack_filled[-1]
 
-        # Extrapolate for lead_times timesteps
-        forecast = extrapolation.semilagrangian.extrapolate(
-            last_frame, V, lead_times
-        )
-        print(f"Forecast generated, shape: {forecast.shape}")
-    except Exception as e:
-        print(f"Error in extrapolation: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "error": f"Extrapolation failed: {str(e)}",
-            "frames": []
-        }
+    if use_persistence or V is None:
+        # Persistence forecast - just repeat the last frame
+        print("Using persistence forecast (last frame repeated)")
+        forecast = np.stack([last_frame] * lead_times, axis=0)
+    else:
+        # Extrapolate forward using semi-Lagrangian advection
+        try:
+            # Debug: Compare first and last input frames to see actual motion
+            diff = radar_stack_filled[-1] - radar_stack_filled[0]
+            diff_valid = diff[~np.isnan(diff)]
+            if len(diff_valid) > 0:
+                print(f"Frame difference (last-first): mean={np.mean(diff_valid):.2f}, max change={np.max(np.abs(diff_valid)):.2f}")
+
+            # Get mean motion for simple shift test
+            v_y_mean = np.nanmean(V[0])
+            v_x_mean = np.nanmean(V[1])
+
+            # Try simple shift-based extrapolation first for debugging
+            # This uses scipy.ndimage.shift which is straightforward
+            from scipy.ndimage import shift as ndshift
+            print(f"Testing simple shift extrapolation with mean motion: dy={v_y_mean:.2f}, dx={v_x_mean:.2f}")
+
+            forecast = []
+            for i in range(lead_times):
+                # Shift by accumulated motion
+                # Note: shift uses (y, x) order and shifts in the direction of the motion
+                # For weather moving south (positive V[0]), we shift the data north (negative shift)
+                # to show where the weather WILL BE
+                shift_y = (i + 1) * v_y_mean
+                shift_x = (i + 1) * v_x_mean
+                shifted = ndshift(last_frame, [shift_y, shift_x], mode='constant', cval=0)
+                forecast.append(shifted)
+
+            forecast = np.stack(forecast, axis=0)
+            print(f"Simple shift forecast generated, shape: {forecast.shape}")
+
+            # Debug: Show how much forecast differs from persistence
+            for i in range(min(3, lead_times)):
+                fc_diff = forecast[i] - last_frame
+                fc_diff_valid = fc_diff[~np.isnan(fc_diff)]
+                if len(fc_diff_valid) > 0:
+                    print(f"  Forecast frame {i+1} differs from last by: mean abs={np.mean(np.abs(fc_diff_valid)):.2f}")
+
+        except Exception as e:
+            print(f"Error in extrapolation: {e}, using persistence instead")
+            import traceback
+            traceback.print_exc()
+            forecast = np.stack([last_frame] * lead_times, axis=0)
 
     # Generate images for each forecast frame
     frames = []
@@ -750,11 +860,19 @@ def generate_forecast(station: str, field: str = 'reflectivity',
             # Create meshgrid for plotting
             lon_mesh, lat_mesh = np.meshgrid(grids[-1]['lon_grid'], grids[-1]['lat_grid'])
 
-            # Mask invalid values
-            frame_masked = np.ma.masked_where(
-                (frame_data < vmin) | np.isnan(frame_data),
-                frame_data
-            )
+            # Apply noise threshold - same as radar image generation
+            if field == 'reflectivity':
+                noise_threshold = 5  # Filter out values below 5 dBZ
+                frame_masked = np.ma.masked_where(
+                    (frame_data < noise_threshold) | np.isnan(frame_data),
+                    frame_data
+                )
+            else:
+                noise_threshold = 1  # For velocity, mask near-zero values
+                frame_masked = np.ma.masked_where(
+                    (np.abs(frame_data) < noise_threshold) | np.isnan(frame_data),
+                    frame_data
+                )
 
             ax.pcolormesh(lon_mesh, lat_mesh, frame_masked,
                          cmap=cmap, vmin=vmin, vmax=vmax,
@@ -930,6 +1048,219 @@ async def get_radar_forecast(station: str, field: str = 'reflectivity',
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/api/cache/list")
+async def list_cache():
+    """List all cached images for debugging/testing."""
+    image_cache_dir = get_image_cache_dir()
+    radar_cache_dir = get_cache_dir()
+
+    cached_images = []
+    for f in image_cache_dir.glob('*.json'):
+        try:
+            data = json.loads(f.read_text())
+            cached_images.append({
+                "cache_key": f.stem,
+                "timestamp": data.get("timestamp"),
+                "has_image": data.get("image") is not None,
+                "file_modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+            })
+        except:
+            pass
+
+    cached_radar_files = []
+    for f in radar_cache_dir.glob('*'):
+        if f.is_file() and not f.name.endswith('.json'):
+            # Parse station from filename (e.g., KOKX20240121_123456_V06)
+            name = f.name
+            station = name[:4] if len(name) >= 4 else name
+            cached_radar_files.append({
+                "filename": name,
+                "station": station,
+                "file_modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+                "size_mb": round(f.stat().st_size / (1024 * 1024), 2)
+            })
+
+    return {
+        "image_cache_count": len(cached_images),
+        "radar_file_count": len(cached_radar_files),
+        "cached_images": sorted(cached_images, key=lambda x: x.get("timestamp") or "", reverse=True),
+        "cached_radar_files": sorted(cached_radar_files, key=lambda x: x["filename"], reverse=True)
+    }
+
+
+@app.get("/api/cache/image/{cache_key}")
+async def get_cached_image_by_key(cache_key: str):
+    """Get a specific cached image by its cache key."""
+    cache_file = get_image_cache_dir() / f"{cache_key}.json"
+    if not cache_file.exists():
+        raise HTTPException(status_code=404, detail="Cache key not found")
+
+    try:
+        data = json.loads(cache_file.read_text())
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cache/stations")
+async def get_cached_stations():
+    """Get list of stations that have cached data, grouped by timestamp."""
+    radar_cache_dir = get_cache_dir()
+
+    # Get all cached radar files and group by station
+    station_data = {}
+    for f in radar_cache_dir.glob('*'):
+        if f.is_file() and not f.name.endswith('.json'):
+            name = f.name
+            # Extract station code (first 4 chars)
+            if len(name) >= 4:
+                station = name[:4]
+                if station not in station_data:
+                    station_data[station] = []
+                station_data[station].append({
+                    "filename": name,
+                    "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+                })
+
+    # Sort files for each station by name (which includes timestamp)
+    for station in station_data:
+        station_data[station] = sorted(station_data[station], key=lambda x: x["filename"], reverse=True)
+
+    return {
+        "stations": list(station_data.keys()),
+        "station_files": station_data
+    }
+
+
+@app.get("/api/cache/timeline")
+async def get_cache_timeline():
+    """Get cached radar files grouped by time slots for timeline display."""
+    import re
+    radar_cache_dir = get_cache_dir()
+
+    # Parse timestamps from filenames and group by rounded time
+    time_slots = {}
+
+    for f in radar_cache_dir.glob('*'):
+        if f.is_file() and not f.name.endswith('.json') and '_MDM' not in f.name:
+            name = f.name
+            # Extract station and timestamp from filename
+            # Format: KXXX20240121_123456_V06
+            if len(name) >= 4:
+                station = name[:4]
+                # Try to parse timestamp from filename
+                match = re.search(r'(\d{8})_(\d{6})', name)
+                if match:
+                    date_str = match.group(1)  # 20240121
+                    time_str = match.group(2)  # 123456
+                    try:
+                        # Parse the datetime
+                        dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+                        # Round to nearest 5 minutes for grouping
+                        minutes = (dt.minute // 5) * 5
+                        slot_time = dt.replace(minute=minutes, second=0)
+                        slot_key = slot_time.strftime("%Y-%m-%d %H:%M")
+
+                        if slot_key not in time_slots:
+                            time_slots[slot_key] = {
+                                "datetime": slot_time.isoformat(),
+                                "display_time": slot_time.strftime("%H:%M"),
+                                "display_date": slot_time.strftime("%m/%d"),
+                                "stations": set(),
+                                "files": []
+                            }
+                        time_slots[slot_key]["stations"].add(station)
+                        time_slots[slot_key]["files"].append({
+                            "station": station,
+                            "filename": name
+                        })
+                    except:
+                        pass
+
+    # Convert sets to lists and sort by time (oldest first for timeline)
+    result = []
+    for key in sorted(time_slots.keys()):  # Ascending order (oldest first)
+        slot = time_slots[key]
+        result.append({
+            "slot_key": key,
+            "datetime": slot["datetime"],
+            "utc_time": slot["display_time"],
+            "utc_date": slot["display_date"],
+            "station_count": len(slot["stations"]),
+            "stations": list(slot["stations"]),
+            "files": slot["files"]
+        })
+
+    # Return last 20 slots, but in chronological order (oldest to newest)
+    return {
+        "slots": result[-20:] if len(result) > 20 else result
+    }
+
+
+@app.get("/api/radar/{station}/cached")
+async def get_cached_radar(station: str, field: str = 'reflectivity'):
+    """Get radar image from cache only - won't fetch new data."""
+    station = station.upper()
+
+    if station not in RADAR_STATIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown station: {station}")
+
+    # Find cached radar files for this station
+    radar_cache_dir = get_cache_dir()
+    cached_files = sorted(
+        [f for f in radar_cache_dir.glob(f'{station}*') if f.is_file() and '_MDM' not in f.name],
+        key=lambda f: f.name,
+        reverse=True
+    )
+
+    if not cached_files:
+        return JSONResponse(
+            status_code=200,
+            content={"error": f"No cached data for {station}", "station": station}
+        )
+
+    # Use the most recent cached file
+    radar_file = str(cached_files[0])
+
+    # Check if we have a cached image for this file
+    cached = get_cached_image(radar_file, field)
+    if cached:
+        return {
+            "station": station,
+            "name": RADAR_STATIONS[station]["name"],
+            "field": field,
+            "image": cached["image"],
+            "timestamp": cached["timestamp"],
+            "bounds": cached["bounds"],
+            "from_cache": True
+        }
+
+    # Generate image from cached radar file (but don't download new data)
+    try:
+        result = generate_radar_image(station, field, radar_file=radar_file)
+
+        if result['error']:
+            return JSONResponse(
+                status_code=200,
+                content={"error": result['error'], "station": station}
+            )
+
+        return {
+            "station": station,
+            "name": RADAR_STATIONS[station]["name"],
+            "field": field,
+            "image": result["image"],
+            "timestamp": result["timestamp"],
+            "bounds": result["bounds"],
+            "from_cache": True
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "station": station}
+        )
 
 
 if __name__ == "__main__":
